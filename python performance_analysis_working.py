@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+from collections import OrderedDict
 
 # --------------------- Setup ---------------------
 script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -24,14 +25,13 @@ def autofit_worksheet_columns(worksheet, dataframe):
 def safe_float_conversion(series):
     return pd.to_numeric(series.astype(str).str.replace(',','').str.replace('%',''), errors='coerce')
 
-# --------------------- Find Oldest Excel Files ---------------------
+# --------------------- Load Files ---------------------
 xls_files = sorted(
     [os.path.join(report_folder, f) for f in os.listdir(report_folder)
      if f.endswith(('.xls', '.xlsx')) and is_safe_file_path(os.path.join(report_folder, f))],
     key=os.path.getmtime
 )[:2]
 
-# --------------------- Load Script Sheet Mapping ---------------------
 sheet_mapping_file = os.path.join(script_directory, "script_sheet_mapping.txt")
 script_sheet_map = {}
 with open(sheet_mapping_file, 'r') as f:
@@ -39,6 +39,14 @@ with open(sheet_mapping_file, 'r') as f:
         if ':' in line:
             sheet_name, keyword = line.strip().split(':', 1)
             script_sheet_map[sheet_name.strip()] = keyword.strip()
+
+pattern_mapping_file = os.path.join(script_directory, "pattern_mapping.txt")
+pattern_map = {}
+with open(pattern_mapping_file, 'r') as f:
+    for line in f:
+        if ':' in line:
+            sheet_name, pattern = line.strip().split(':', 1)
+            pattern_map[sheet_name.strip()] = pattern.strip().lower()
 
 # --------------------- Functions ---------------------
 def process_excel_file(xls_file):
@@ -67,7 +75,6 @@ def process_excel_file(xls_file):
     sorted_data = selected_data.sort_values(by="Transaction Name").reset_index(drop=True)
 
     excluded_data = df.drop(filtered_data.index).reset_index(drop=True)
-
     for idx, row in excluded_data.iterrows():
         if str(row.iloc[0]).startswith("Period:"):
             excluded_data = excluded_data.iloc[idx:].reset_index(drop=True)
@@ -87,7 +94,7 @@ def load_all_csvs_in_folder():
     dataframes = {}
     for f in csv_files:
         try:
-            df = pd.read_csv(os.path.join(raw_data_folder, f), header=None)
+            df = pd.read_csv(os.path.join(raw_data_folder, f), header=None, dtype=str)
             if df.iloc[0].isnull().sum() == 0:
                 df.columns = df.iloc[0]
                 df = df[1:].reset_index(drop=True)
@@ -114,7 +121,6 @@ if len(output_files) != 2:
 
 df1 = pd.read_excel(os.path.join(processed_folder, output_files[0]), sheet_name='Processed Data')
 df2 = pd.read_excel(os.path.join(processed_folder, output_files[1]), sheet_name='Processed Data')
-
 df1 = df1[['Transaction Name','Source File'] + columns_to_select[1:]]
 df2 = df2[['Transaction Name','Source File'] + columns_to_select[1:]]
 
@@ -122,112 +128,127 @@ for df in [df1, df2]:
     for col in ['Pass','Fail','Stop','Average','90 Percent']:
         df[col] = safe_float_conversion(df[col])
 
-# --------------------- Remove duplicates within baseline/newcode before merge ---------------------
 df1 = df1.groupby('Transaction Name', as_index=False).agg({
-    'Source File': 'first',
-    'Average': 'mean',
-    '90 Percent': 'mean',
-    'Pass': 'sum',
-    'Fail': 'sum',
-    'Stop': 'sum'
+    'Source File': 'first','Average': 'mean','90 Percent': 'mean',
+    'Pass':'sum','Fail':'sum','Stop':'sum'
 })
 df2 = df2.groupby('Transaction Name', as_index=False).agg({
-    'Source File': 'first',
-    'Average': 'mean',
-    '90 Percent': 'mean',
-    'Pass': 'sum',
-    'Fail': 'sum',
-    'Stop': 'sum'
+    'Source File': 'first','Average': 'mean','90 Percent': 'mean',
+    'Pass':'sum','Fail':'sum','Stop':'sum'
 })
 
 raw_csv_dict = load_all_csvs_in_folder()
 
-# --------------------- Write Final Excel ---------------------
+# --------------------- Write Excel ---------------------
 comparison_file = os.path.join(script_directory,'comparison.xlsx')
-with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
+all_sheet_names = OrderedDict()  # key=truncated sheet name, value=full title
 
+with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
     workbook = writer.book
     link_fmt = workbook.add_format({'font_color': 'blue','underline':1})
-    all_sheet_names = []
 
     # --------------------- Index Sheet FIRST ---------------------
-    index_df = pd.DataFrame({'Sheet Name': []})  # empty for now
+    index_df = pd.DataFrame({'Sheet Name': []})
     index_df.to_excel(writer, sheet_name='Index', index=False)
     ws_index = writer.sheets['Index']
+    all_sheet_names['Index'] = 'Index'
 
-    # --------------------- Script Sheets ---------------------
+    # --------------------- Script Sheets with Conditional Formatting ---------------------
+    green_format = workbook.add_format({'bg_color': '#EBF1DE'})
+    orange_format = workbook.add_format({'bg_color': '#FFA500'})
+    red_format = workbook.add_format({'bg_color': '#FF5D5D'})
+
     for sheet_name, keyword in script_sheet_map.items():
-        keyword_lower = keyword.replace('%','').lower()
+        truncated_name = sheet_name[:31]
+        if truncated_name in all_sheet_names:
+            continue
+        all_sheet_names[truncated_name] = sheet_name
 
-        mask_baseline = df1['Transaction Name'].astype(str).str.lower().str.contains(keyword_lower)
-        mask_newcode = df2['Transaction Name'].astype(str).str.lower().str.contains(keyword_lower)
-
+        mask_baseline = df1['Transaction Name'].str.lower().str.contains(keyword.replace('%','').lower())
+        mask_newcode = df2['Transaction Name'].str.lower().str.contains(keyword.replace('%','').lower())
         df_script = pd.merge(df1[mask_baseline], df2[mask_newcode],
                              on='Transaction Name', how='outer',
-                             suffixes=('_Baseline','_NewCode'))
-
-        df_script = df_script.drop_duplicates(subset=['Transaction Name']).reset_index(drop=True)
-        df_script = df_script.sort_values(by='Transaction Name').reset_index(drop=True)
-
-        # Calculated differences
+                             suffixes=('_Baseline','_NewCode')).drop_duplicates()
         df_script['Avg_Diff'] = df_script['Average_NewCode'] - df_script['Average_Baseline']
-        df_script['Avg Percent_Diff'] = (df_script['Average_NewCode'] - df_script['Average_Baseline']) / df_script['Average_Baseline'].replace({0: pd.NA})
         df_script['90 Percentile Diff'] = (df_script['90 Percent_NewCode'] - df_script['90 Percent_Baseline']) / df_script['90 Percent_Baseline'].replace({0: pd.NA})
 
-        df_script_to_write = df_script.drop(columns=['Avg Percent_Diff'])
-        df_script_to_write.to_excel(writer, sheet_name=sheet_name[:31], index=False, startrow=1)
-        ws_script = writer.sheets[sheet_name[:31]]
-        ws_script.freeze_panes(1,1)
-        autofit_worksheet_columns(ws_script, df_script_to_write)
+        df_script.to_excel(writer, sheet_name=truncated_name, index=False, startrow=1)
+        ws = writer.sheets[truncated_name]
+        ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
+        ws.freeze_panes(1,1)
+        autofit_worksheet_columns(ws, df_script)
 
-        ws_script.write_url(0, 0, "internal:'Index'!A1", cell_format=link_fmt, string="Back to Index")
-
-        # Conditional formatting
-        green_format = workbook.add_format({'bg_color': '#EBF1DE'})
-        orange_format = workbook.add_format({'bg_color': '#FFA500'})
-        red_format = workbook.add_format({'bg_color': '#FF5D5D'})
-
-        avg_diff_col = df_script_to_write.columns.get_loc('Avg_Diff')
-        ninty_perc_diff_col = df_script_to_write.columns.get_loc('90 Percentile Diff')
-
-        for row in range(2, 2 + len(df_script_to_write)):
-            ws_script.conditional_format(row, avg_diff_col, row, avg_diff_col, {'type': 'cell', 'criteria': '<', 'value': 0, 'format': green_format})
-            ws_script.conditional_format(row, avg_diff_col, row, avg_diff_col, {'type': 'formula', 'criteria': f'=ABS(${"{:c}".format(65 + avg_diff_col)}${row+1})<0.1', 'format': green_format})
-            ws_script.conditional_format(row, avg_diff_col, row, avg_diff_col, {'type': 'formula', 'criteria': f'=AND(ABS(${"{:c}".format(65 + avg_diff_col)}${row+1})>=0.1, ABS(${"{:c}".format(65 + avg_diff_col)}${row+1})<=0.25)', 'format': orange_format})
-            ws_script.conditional_format(row, avg_diff_col, row, avg_diff_col, {'type': 'formula', 'criteria': f'=ABS(${"{:c}".format(65 + avg_diff_col)}${row+1})>0.25', 'format': red_format})
-
-            ws_script.conditional_format(row, ninty_perc_diff_col, row, ninty_perc_diff_col, {'type': 'cell', 'criteria': '<', 'value': 0, 'format': green_format})
-            ws_script.conditional_format(row, ninty_perc_diff_col, row, ninty_perc_diff_col, {'type': 'formula', 'criteria': f'=ABS(${"{:c}".format(65 + ninty_perc_diff_col)}${row+1})<0.1', 'format': green_format})
-            ws_script.conditional_format(row, ninty_perc_diff_col, row, ninty_perc_diff_col, {'type': 'formula', 'criteria': f'=AND(ABS(${"{:c}".format(65 + ninty_perc_diff_col)}${row+1})>=0.1, ABS(${"{:c}".format(65 + ninty_perc_diff_col)}${row+1})<=0.25)', 'format': orange_format})
-            ws_script.conditional_format(row, ninty_perc_diff_col, row, ninty_perc_diff_col, {'type': 'formula', 'criteria': f'=ABS(${"{:c}".format(65 + ninty_perc_diff_col)}${row+1})>0.25', 'format': red_format})
-
-        all_sheet_names.append(sheet_name[:31])
+        # ---------- Conditional formatting ----------
+        avg_col = df_script.columns.get_loc('Avg_Diff')
+        perc90_col = df_script.columns.get_loc('90 Percentile Diff')
+        for row in range(2, 2+len(df_script)):
+            # Avg_Diff
+            ws.conditional_format(row, avg_col, row, avg_col, {'type':'cell','criteria':'<','value':0,'format':green_format})
+            ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+avg_col)}${row+1})<0.1','format':green_format})
+            ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=AND(ABS(${"{:c}".format(65+avg_col)}${row+1})>=0.1,ABS(${"{:c}".format(65+avg_col)}${row+1})<=0.25)','format':orange_format})
+            ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+avg_col)}${row+1})>0.25','format':red_format})
+            # 90 Percentile Diff
+            ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'cell','criteria':'<','value':0,'format':green_format})
+            ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+perc90_col)}${row+1})<0.1','format':green_format})
+            ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'formula','criteria':f'=AND(ABS(${"{:c}".format(65+perc90_col)}${row+1})>=0.1,ABS(${"{:c}".format(65+perc90_col)}${row+1})<=0.25)','format':orange_format})
+            ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+perc90_col)}${row+1})>0.25','format':red_format})
 
     # --------------------- Baseline & NewCode Info ---------------------
-    excluded_dataframes[0].to_excel(writer, sheet_name='Baseline_Info', index=False)
-    ws_baseline = writer.sheets['Baseline_Info']
-    ws_baseline.write_url(0, 0, "internal:'Index'!A1", cell_format=link_fmt, string="Back to Index")
-    autofit_worksheet_columns(ws_baseline, excluded_dataframes[0])
-    all_sheet_names.append('Baseline_Info')
-
-    excluded_dataframes[1].to_excel(writer, sheet_name='NewCode_Info', index=False)
-    ws_newcode = writer.sheets['NewCode_Info']
-    ws_newcode.write_url(0, 0, "internal:'Index'!A1", cell_format=link_fmt, string="Back to Index")
-    autofit_worksheet_columns(ws_newcode, excluded_dataframes[1])
-    all_sheet_names.append('NewCode_Info')
+    for df, name in zip(excluded_dataframes, ['Baseline_Info','NewCode_Info']):
+        truncated_name = name[:31]
+        if truncated_name not in all_sheet_names:
+            all_sheet_names[truncated_name] = name
+        df.to_excel(writer, sheet_name=truncated_name, index=False)
+        ws = writer.sheets[truncated_name]
+        ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
+        autofit_worksheet_columns(ws, df)
 
     # --------------------- Raw CSV Sheets ---------------------
     for filename, df in raw_csv_dict.items():
-        sheet_name_csv = filename[:31].replace(".", "_")
-        df.to_excel(writer, sheet_name=sheet_name_csv, index=False)
-        ws_raw = writer.sheets[sheet_name_csv]
-        ws_raw.write_url(0, 0, "internal:'Index'!A1", cell_format=link_fmt, string="Back to Index")
-        ws_raw.freeze_panes(1,0)
-        autofit_worksheet_columns(ws_raw, df)
-        all_sheet_names.append(sheet_name_csv)
+        truncated_name = filename[:31].replace(".","_")
+        if truncated_name not in all_sheet_names:
+            all_sheet_names[truncated_name] = filename
+        df.to_excel(writer, sheet_name=truncated_name, index=False)
+        ws = writer.sheets[truncated_name]
+        ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
+        ws.freeze_panes(1,0)
+        autofit_worksheet_columns(ws, df)
 
-    # --------------------- Update Index Sheet with all hyperlinks ---------------------
-    for row_idx, sheet_name in enumerate(all_sheet_names, start=1):
-        ws_index.write_url(row_idx, 0, f"internal:'{sheet_name}'!A1", cell_format=link_fmt, string=sheet_name)
+    # --------------------- Pattern Summary ---------------------
+    pattern_summary = []
+    for sheet_name, pattern in pattern_map.items():
+        truncated_name = sheet_name[:31]
+        if truncated_name not in all_sheet_names:
+            continue
+        keyword_lower = script_sheet_map.get(sheet_name,'').replace('%','').lower()
+        mask_baseline = df1['Transaction Name'].str.lower().str.contains(keyword_lower)
+        mask_newcode = df2['Transaction Name'].str.lower().str.contains(keyword_lower)
+        df_script = pd.merge(df1[mask_baseline], df2[mask_newcode],
+                             on='Transaction Name', how='outer', suffixes=('_Baseline','_NewCode'))
+        df_pattern = df_script[df_script['Transaction Name'].str.lower().str.contains(pattern)]
+        for _, row in df_pattern.iterrows():
+            pattern_summary.append({
+                'Script Name': sheet_name,
+                'Transaction Name': row['Transaction Name'],
+                'Sum Baseline': row.get('Pass_Baseline',0)+row.get('Fail_Baseline',0)+row.get('Stop_Baseline',0),
+                'Sum NewCode': row.get('Pass_NewCode',0)+row.get('Fail_NewCode',0)+row.get('Stop_NewCode',0),
+                'Difference': (row.get('Pass_NewCode',0)+row.get('Fail_NewCode',0)+row.get('Stop_NewCode',0)) -
+                              (row.get('Pass_Baseline',0)+row.get('Fail_Baseline',0)+row.get('Stop_Baseline',0))
+            })
+    if pattern_summary:
+        df_pattern_summary = pd.DataFrame(pattern_summary)
+        df_pattern_summary.to_excel(writer, sheet_name='Pattern_Summary', index=False)
+        ws = writer.sheets['Pattern_Summary']
+        ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
+        autofit_worksheet_columns(ws, df_pattern_summary)
+        all_sheet_names['Pattern_Summary']='Pattern_Summary'
+
+    # --------------------- Update Index ---------------------
+    index_df = pd.DataFrame({'Sheet Name': list(all_sheet_names.keys())})
+    index_df.to_excel(writer, sheet_name='Index', index=False)
+    ws_index = writer.sheets['Index']
+    for row_idx, sheet_name in enumerate(all_sheet_names.keys()):
+        ws_index.write_url(row_idx, 0, f"internal:'{sheet_name}'!A1", cell_format=link_fmt,string=sheet_name)
+    autofit_worksheet_columns(ws_index, index_df)
 
 print("comparison.xlsx generated successfully.")
