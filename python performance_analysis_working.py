@@ -3,39 +3,48 @@ import pandas as pd
 from collections import OrderedDict
 
 # --------------------- Setup ---------------------
+# Get current script directory
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
+# Define folders for raw CSVs, input Excel reports, and processed outputs
 raw_data_folder = os.path.join(script_directory, "rawData")
 report_folder = os.path.join(script_directory, "Report")
 processed_folder = os.path.join(script_directory, "Processed files")
 os.makedirs(processed_folder, exist_ok=True)
 
+# Columns to select from processed Excel reports
 columns_to_select = ["Transaction Name", "Average", "90 Percent", "Pass", "Fail", "Stop"]
 
-# Columns to include from raw CSVs
-raw_keep_columns = ['Transaction End Status','Script Name','Scenario Elapsed Time','Transaction Response Time','Transaction Name']  # change as needed
+# Columns to keep from raw CSV files (you can modify this)
+raw_keep_columns = ['Transaction Name','Response Time','Pass','Fail','Stop']
 
 # --------------------- Utility Functions ---------------------
+
+# Checks that file path is inside the script folder to avoid unsafe access
 def is_safe_file_path(file_path):
     return os.path.commonpath([script_directory, file_path]) == script_directory
 
+# Autofit Excel worksheet columns based on content length
 def autofit_worksheet_columns(worksheet, dataframe):
     for idx, col in enumerate(dataframe.columns):
         series = dataframe[col].astype(str)
         max_len = max(series.map(len).max(), len(str(col))) + 2
         worksheet.set_column(idx, idx, max_len)
 
+# Safely convert numeric columns, removing commas and % symbols
 def safe_float_conversion(series):
     return pd.to_numeric(series.astype(str).str.replace(',','').str.replace('%',''), errors='coerce')
 
 # --------------------- Load Files ---------------------
+
+# Get the 2 oldest Excel reports from Report folder
 xls_files = sorted(
     [os.path.join(report_folder, f) for f in os.listdir(report_folder)
      if f.endswith(('.xls', '.xlsx')) and is_safe_file_path(os.path.join(report_folder, f))],
     key=os.path.getmtime
 )[:2]
 
-# Script-to-keyword mapping
+# Load script-to-keyword mapping (for creating sheets based on scripts)
 sheet_mapping_file = os.path.join(script_directory, "script_sheet_mapping.txt")
 script_sheet_map = {}
 with open(sheet_mapping_file, 'r') as f:
@@ -44,7 +53,7 @@ with open(sheet_mapping_file, 'r') as f:
             sheet_name, keyword = line.strip().split(':', 1)
             script_sheet_map[sheet_name.strip()] = keyword.strip()
 
-# Pattern-to-sheet mapping
+# Load pattern mapping (for transaction summary)
 pattern_mapping_file = os.path.join(script_directory, "pattern_mapping.txt")
 pattern_map = {}
 with open(pattern_mapping_file, 'r') as f:
@@ -54,10 +63,13 @@ with open(pattern_mapping_file, 'r') as f:
             pattern_map[sheet_name.strip()] = pattern.strip().lower()
 
 # --------------------- Functions ---------------------
+
+# Process each Excel file to extract relevant transaction data
 def process_excel_file(xls_file):
     xls = pd.ExcelFile(xls_file)
     df = pd.read_excel(xls, xls.sheet_names[0], header=None)
 
+    # Find start and end rows of transaction table
     start_idx = end_idx = None
     for idx, row in df.iterrows():
         if row.astype(str).str.contains('Transaction Name', na=False).any():
@@ -79,6 +91,7 @@ def process_excel_file(xls_file):
     selected_data['Source File'] = os.path.basename(xls_file)
     sorted_data = selected_data.sort_values(by="Transaction Name").reset_index(drop=True)
 
+    # Exclude non-transaction rows for reference
     excluded_data = df.drop(filtered_data.index).reset_index(drop=True)
     for idx, row in excluded_data.iterrows():
         if str(row.iloc[0]).startswith("Period:"):
@@ -94,6 +107,7 @@ def process_excel_file(xls_file):
 
     return sorted_data, excluded_data, output_filename
 
+# Load all CSV files in RawData folder, keep only selected columns
 def load_all_csvs_in_folder():
     csv_files = [f for f in os.listdir(raw_data_folder) if f.lower().endswith('.csv')]
     dataframes = {}
@@ -107,6 +121,7 @@ def load_all_csvs_in_folder():
     return dataframes
 
 # --------------------- Main Processing ---------------------
+
 output_files = []
 excluded_dataframes = []
 
@@ -120,15 +135,18 @@ if len(output_files) != 2:
     print("Less than 2 Excel files found in 'Report'. Exiting.")
     exit()
 
+# Read processed baseline and newcode data
 df1 = pd.read_excel(os.path.join(processed_folder, output_files[0]), sheet_name='Processed Data')
 df2 = pd.read_excel(os.path.join(processed_folder, output_files[1]), sheet_name='Processed Data')
 df1 = df1[['Transaction Name','Source File'] + columns_to_select[1:]]
 df2 = df2[['Transaction Name','Source File'] + columns_to_select[1:]]
 
+# Convert numeric columns safely
 for df in [df1, df2]:
     for col in ['Pass','Fail','Stop','Average','90 Percent']:
         df[col] = safe_float_conversion(df[col])
 
+# Remove duplicates and aggregate metrics
 df1 = df1.groupby('Transaction Name', as_index=False).agg({
     'Source File': 'first','Average': 'mean','90 Percent': 'mean',
     'Pass':'sum','Fail':'sum','Stop':'sum'
@@ -154,11 +172,11 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
     ws_index = writer.sheets['Index']
     all_sheet_names['Index'] = 'Index'
 
-    # --------------------- Script Sheets ---------------------
     green_format = workbook.add_format({'bg_color': '#EBF1DE'})
     orange_format = workbook.add_format({'bg_color': '#FFA500'})
     red_format = workbook.add_format({'bg_color': '#FF5D5D'})
 
+    # --------------------- Script Sheets ---------------------
     for sheet_name, keyword in script_sheet_map.items():
         truncated_name = sheet_name[:31]
         if truncated_name in all_sheet_names:  # skip duplicates
@@ -170,6 +188,7 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         df_script = pd.merge(df1[mask_baseline], df2[mask_newcode],
                              on='Transaction Name', how='outer',
                              suffixes=('_Baseline','_NewCode')).drop_duplicates()
+
         df_script['Avg_Diff'] = df_script['Average_NewCode'] - df_script['Average_Baseline']
         df_script['90 Percentile Diff'] = (df_script['90 Percent_NewCode'] - df_script['90 Percent_Baseline']) / df_script['90 Percent_Baseline'].replace({0: pd.NA})
 
@@ -179,7 +198,7 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         ws.freeze_panes(1,1)
         autofit_worksheet_columns(ws, df_script)
 
-        # Conditional formatting
+        # Conditional formatting for Avg_Diff and 90 Percentile Diff
         if 'Avg_Diff' in df_script.columns:
             avg_col = df_script.columns.get_loc('Avg_Diff')
             for row in range(2, 2 + len(df_script)):
@@ -242,6 +261,26 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         autofit_worksheet_columns(ws, df_pattern_summary)
         all_sheet_names['Pattern_Summary']='Pattern_Summary'
 
+    # --------------------- Instruction Sheet ---------------------
+    instruction_text = [
+        "Performance Analysis Report - Instructions",
+        "",
+        "1. Index sheet contains hyperlinks to all other sheets.",
+        "2. Script sheets show baseline vs new code metrics for each transaction.",
+        "   - Columns Avg_Diff and 90 Percentile Diff are color-coded:",
+        "       Green = improvement, Orange = slight change, Red = high difference",
+        "3. Baseline_Info and NewCode_Info sheets provide excluded data and file reference info.",
+        "4. Raw CSV sheets include transaction raw data from the RawData folder (only selected columns).",
+        "5. Pattern_Summary shows user-defined transaction patterns, total counts, and difference baseline vs new code.",
+        "6. Use the Back to Index links to navigate easily.",
+        "7. This report helps quickly identify performance regressions or improvements across scripts."
+    ]
+    df_instr = pd.DataFrame({'Instructions': instruction_text})
+    df_instr.to_excel(writer, sheet_name='Instructions', index=False)
+    ws_instr = writer.sheets['Instructions']
+    autofit_worksheet_columns(ws_instr, df_instr)
+    all_sheet_names['Instructions']='Instructions'
+
     # --------------------- Update Index ---------------------
     index_df = pd.DataFrame({'Sheet Name': list(all_sheet_names.keys())})
     index_df.to_excel(writer, sheet_name='Index', index=False)
@@ -250,4 +289,4 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         ws_index.write_url(row_idx, 0, f"internal:'{sheet_name}'!A1", cell_format=link_fmt,string=sheet_name)
     autofit_worksheet_columns(ws_index, index_df)
 
-print("comparison.xlsx generated successfully.")
+print("comparison.xlsx generated successfully with Instructions sheet.")
