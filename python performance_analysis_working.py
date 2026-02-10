@@ -172,6 +172,9 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         keyword_lower = keyword.replace('%','').lower()
         df_script = merged[merged['Transaction Name'].astype(str).str.lower().str.contains(keyword_lower)].copy()
 
+        # ⚡ Sort alphabetically by Transaction Name
+        df_script = df_script.sort_values(by='Transaction Name')
+
         # Safe diff calculations
         df_script['Avg_Diff'] = df_script['Average_NewCode'] - df_script['Average_Baseline']
         df_script['Avg Percent_Diff'] = (df_script['Average_NewCode'] - df_script['Average_Baseline']) / df_script['Average_Baseline'].replace({0: pd.NA})
@@ -205,7 +208,7 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
                 {'type':'cell','criteria':'>','value':0.25,'format':red_fmt})
 
         # Total (Mapped) row in Source File columns
-        total_row = {'Transaction Name':'Total (Cases)'}
+        total_row = {'Transaction Name':'Total (Mapped)'}
         if sheet_name in total_txn_map:
             mapped_patterns = total_txn_map[sheet_name]
             mask = df_script['Transaction Name'].astype(str).apply(lambda x: any(p.lower() in str(x).lower() for p in mapped_patterns))
