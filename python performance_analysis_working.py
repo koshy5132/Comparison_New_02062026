@@ -12,9 +12,8 @@ os.makedirs(processed_folder, exist_ok=True)
 
 columns_to_select = ["Transaction Name", "Average", "90 Percent", "Pass", "Fail", "Stop"]
 
-# Specify which columns from raw CSVs you want in Excel (by name or index)
-# Example by name (if CSV has headers)
-raw_keep_columns = ['Transaction End Status','Script Name','Scenario Elapsed Time','Transaction Response Time','Transaction Name']
+# Columns to include from raw CSVs
+raw_keep_columns = ['Transaction End Status','Script Name','Scenario Elapsed Time','Transaction Response Time','Transaction Name']  # change as needed
 
 # --------------------- Utility Functions ---------------------
 def is_safe_file_path(file_path):
@@ -36,6 +35,7 @@ xls_files = sorted(
     key=os.path.getmtime
 )[:2]
 
+# Script-to-keyword mapping
 sheet_mapping_file = os.path.join(script_directory, "script_sheet_mapping.txt")
 script_sheet_map = {}
 with open(sheet_mapping_file, 'r') as f:
@@ -44,6 +44,7 @@ with open(sheet_mapping_file, 'r') as f:
             sheet_name, keyword = line.strip().split(':', 1)
             script_sheet_map[sheet_name.strip()] = keyword.strip()
 
+# Pattern-to-sheet mapping
 pattern_mapping_file = os.path.join(script_directory, "pattern_mapping.txt")
 pattern_map = {}
 with open(pattern_mapping_file, 'r') as f:
@@ -99,7 +100,6 @@ def load_all_csvs_in_folder():
     for f in csv_files:
         try:
             df = pd.read_csv(os.path.join(raw_data_folder, f), header=0, dtype=str, low_memory=False)
-            # Keep only selected columns
             df = df[[c for c in raw_keep_columns if c in df.columns]]
             dataframes[f] = df
         except Exception as e:
@@ -142,26 +142,26 @@ raw_csv_dict = load_all_csvs_in_folder()
 
 # --------------------- Write Excel ---------------------
 comparison_file = os.path.join(script_directory,'comparison.xlsx')
-all_sheet_names = OrderedDict()  # key=truncated sheet name, value=full title
+all_sheet_names = OrderedDict()
 
 with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
     workbook = writer.book
     link_fmt = workbook.add_format({'font_color': 'blue','underline':1})
 
-    # --------------------- Index Sheet FIRST ---------------------
+    # Index sheet first
     index_df = pd.DataFrame({'Sheet Name': []})
     index_df.to_excel(writer, sheet_name='Index', index=False)
     ws_index = writer.sheets['Index']
     all_sheet_names['Index'] = 'Index'
 
-    # --------------------- Script Sheets with Conditional Formatting ---------------------
+    # --------------------- Script Sheets ---------------------
     green_format = workbook.add_format({'bg_color': '#EBF1DE'})
     orange_format = workbook.add_format({'bg_color': '#FFA500'})
     red_format = workbook.add_format({'bg_color': '#FF5D5D'})
 
     for sheet_name, keyword in script_sheet_map.items():
         truncated_name = sheet_name[:31]
-        if truncated_name in all_sheet_names:
+        if truncated_name in all_sheet_names:  # skip duplicates
             continue
         all_sheet_names[truncated_name] = sheet_name
 
@@ -179,6 +179,23 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         ws.freeze_panes(1,1)
         autofit_worksheet_columns(ws, df_script)
 
+        # Conditional formatting
+        if 'Avg_Diff' in df_script.columns:
+            avg_col = df_script.columns.get_loc('Avg_Diff')
+            for row in range(2, 2 + len(df_script)):
+                ws.conditional_format(row, avg_col, row, avg_col, {'type':'cell','criteria':'<','value':0,'format':green_format})
+                ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+avg_col)}${row+1})<0.1','format':green_format})
+                ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=AND(ABS(${"{:c}".format(65+avg_col)}${row+1})>=0.1,ABS(${"{:c}".format(65+avg_col)}${row+1})<=0.25)','format':orange_format})
+                ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+avg_col)}${row+1})>0.25','format':red_format})
+
+        if '90 Percentile Diff' in df_script.columns:
+            ninty_col = df_script.columns.get_loc('90 Percentile Diff')
+            for row in range(2, 2 + len(df_script)):
+                ws.conditional_format(row, ninty_col, row, ninty_col, {'type':'cell','criteria':'<','value':0,'format':green_format})
+                ws.conditional_format(row, ninty_col, row, ninty_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+ninty_col)}${row+1})<0.1','format':green_format})
+                ws.conditional_format(row, ninty_col, row, ninty_col, {'type':'formula','criteria':f'=AND(ABS(${"{:c}".format(65+ninty_col)}${row+1})>=0.1,ABS(${"{:c}".format(65+ninty_col)}${row+1})<=0.25)','format':orange_format})
+                ws.conditional_format(row, ninty_col, row, ninty_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+ninty_col)}${row+1})>0.25','format':red_format})
+
     # --------------------- Baseline & NewCode Info ---------------------
     for df, name in zip(excluded_dataframes, ['Baseline_Info','NewCode_Info']):
         truncated_name = name[:31]
@@ -189,7 +206,7 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
         autofit_worksheet_columns(ws, df)
 
-    # --------------------- Raw CSV Sheets (separate, selected columns) ---------------------
+    # --------------------- Raw CSV Sheets ---------------------
     for idx, (filename, df) in enumerate(raw_csv_dict.items(), start=1):
         truncated_name = f"{filename[:25]}_{idx}".replace(".","_")
         all_sheet_names[truncated_name] = filename
