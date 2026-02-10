@@ -182,12 +182,10 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         avg_col = df_script.columns.get_loc('Avg_Diff')
         perc90_col = df_script.columns.get_loc('90 Percentile Diff')
         for row in range(2, 2+len(df_script)):
-            # Avg_Diff
             ws.conditional_format(row, avg_col, row, avg_col, {'type':'cell','criteria':'<','value':0,'format':green_format})
             ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+avg_col)}${row+1})<0.1','format':green_format})
             ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=AND(ABS(${"{:c}".format(65+avg_col)}${row+1})>=0.1,ABS(${"{:c}".format(65+avg_col)}${row+1})<=0.25)','format':orange_format})
             ws.conditional_format(row, avg_col, row, avg_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+avg_col)}${row+1})>0.25','format':red_format})
-            # 90 Percentile Diff
             ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'cell','criteria':'<','value':0,'format':green_format})
             ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'formula','criteria':f'=ABS(${"{:c}".format(65+perc90_col)}${row+1})<0.1','format':green_format})
             ws.conditional_format(row, perc90_col, row, perc90_col, {'type':'formula','criteria':f'=AND(ABS(${"{:c}".format(65+perc90_col)}${row+1})>=0.1,ABS(${"{:c}".format(65+perc90_col)}${row+1})<=0.25)','format':orange_format})
@@ -203,11 +201,10 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
         ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
         autofit_worksheet_columns(ws, df)
 
-    # --------------------- Raw CSV Sheets ---------------------
-    for filename, df in raw_csv_dict.items():
-        truncated_name = filename[:31].replace(".","_")
-        if truncated_name not in all_sheet_names:
-            all_sheet_names[truncated_name] = filename
+    # --------------------- Raw CSV Sheets (separate, unique) ---------------------
+    for idx, (filename, df) in enumerate(raw_csv_dict.items(), start=1):
+        truncated_name = f"{filename[:25]}_{idx}".replace(".","_")
+        all_sheet_names[truncated_name] = filename
         df.to_excel(writer, sheet_name=truncated_name, index=False)
         ws = writer.sheets[truncated_name]
         ws.write_url(0,0,"internal:'Index'!A1", cell_format=link_fmt,string="Back to Index")
@@ -217,9 +214,6 @@ with pd.ExcelWriter(comparison_file, engine='xlsxwriter') as writer:
     # --------------------- Pattern Summary ---------------------
     pattern_summary = []
     for sheet_name, pattern in pattern_map.items():
-        truncated_name = sheet_name[:31]
-        if truncated_name not in all_sheet_names:
-            continue
         keyword_lower = script_sheet_map.get(sheet_name,'').replace('%','').lower()
         mask_baseline = df1['Transaction Name'].str.lower().str.contains(keyword_lower)
         mask_newcode = df2['Transaction Name'].str.lower().str.contains(keyword_lower)
